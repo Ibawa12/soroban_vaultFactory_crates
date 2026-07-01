@@ -98,3 +98,36 @@ pub fn next_proposal_id(env: &Env) -> u64 {
     current
 }
 
+/// Loads the [`SpendingLimit`] configured for `asset`, if any.
+pub fn get_spending_limit(env: &Env, asset: &Address) -> Option<SpendingLimit> {
+    bump_instance(env);
+    env.storage()
+        .instance()
+        .get(&InstanceDataKey::SpendingLimit(asset.clone()))
+}
+
+/// Persists a [`SpendingLimit`] for `asset`, overwriting any prior value.
+pub fn set_spending_limit(env: &Env, asset: &Address, limit: &SpendingLimit) {
+    env.storage()
+        .instance()
+        .set(&InstanceDataKey::SpendingLimit(asset.clone()), limit);
+    bump_instance(env);
+}
+
+/// Removes any [`SpendingLimit`] configured for `asset`.
+pub fn remove_spending_limit(env: &Env, asset: &Address) {
+    env.storage()
+        .instance()
+        .remove(&InstanceDataKey::SpendingLimit(asset.clone()));
+}
+
+/// Extends the contract instance's own TTL (and therefore every key held
+/// in instance storage) if it is due for a bump. Cheap to call
+/// unconditionally — `extend_ttl` is a no-op when the current TTL already
+/// exceeds `to`.
+pub fn bump_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_TO);
+}
+
