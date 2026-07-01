@@ -16,3 +16,5 @@
 //! | [`VaultFactory::execute`]     | High (timelock + spending-limit + action dispatch, security-sensitive) |
 //! | [`VaultFactory::deploy_vault`] | High (cross-contract deployer, WASM hash validation) |
 
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, Vec};
+
