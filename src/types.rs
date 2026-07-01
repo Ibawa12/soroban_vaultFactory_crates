@@ -70,3 +70,34 @@ pub struct SpendingLimit {
     pub period_ledgers: u32,
 }
 
+/// Ephemeral usage counter tracked against a [`SpendingLimit`]. Lives in
+/// **temporary** storage keyed by asset (see
+/// [`crate::storage::TemporaryDataKey::SpendingUsage`]) so that once a
+/// period lapses and no entrypoint touches it, the host garbage-collects
+/// the entry automatically instead of the contract needing to explicitly
+/// reset it.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpendingUsage {
+    /// Cumulative amount transferred so far within the current period.
+    pub spent: i128,
+    /// Ledger sequence number the current rolling window started at.
+    pub period_start_ledger: u32,
+}
+
+/// Payload for [`ProposalAction::Transfer`]. Broken out into its own
+/// `#[contracttype]` struct because Soroban's contract-type derive only
+/// supports enum variants that are either unit variants or a single
+/// tuple field — not multi-field struct variants — so each
+/// [`ProposalAction`] case wraps one of these instead.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransferAction {
+    /// The token contract address to transfer from the vault.
+    pub asset: Address,
+    /// The recipient.
+    pub to: Address,
+    /// Amount to transfer, in the asset's native, unscaled integer units.
+    pub amount: i128,
+}
+
