@@ -101,3 +101,55 @@ pub struct TransferAction {
     pub amount: i128,
 }
 
+/// Payload for [`ProposalAction::GenericInvoke`].
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GenericInvokeAction {
+    pub contract: Address,
+    pub function: Symbol,
+    /// Each argument as its individual XDR-encoded `ScVal` bytes (e.g. via
+    /// `arg_val.to_xdr(&env)` at proposal-creation time), rather than
+    /// `soroban_sdk::Val` directly. A `Val` is a lightweight handle into
+    /// the *current* host frame and is not meaningful once that
+    /// invocation returns, so it cannot be written to persistent or
+    /// temporary storage — a `Proposal` submitted in one transaction and
+    /// executed in a later one would hold dangling handles. Whatever
+    /// eventually implements [`crate::contract::VaultFactory::execute`]
+    /// must decode each entry back into a `Val` (via
+    /// `Val::from_xdr(&env, bytes)` or the equivalent typed conversion)
+    /// immediately before dispatching the cross-contract call.
+    pub args: Vec<Bytes>,
+}
+
+/// Payload for [`ProposalAction::UpdateSigners`].
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateSignersAction {
+    pub signers: Vec<Address>,
+    pub threshold: u32,
+}
+
+/// The concrete effect a [`Proposal`] will have if it reaches `Ready` and
+/// is executed. Modeled as an enum (rather than always shelling out to a
+/// generic cross-contract call) so that the common, security-sensitive
+/// "move funds" case can be validated against [`SpendingLimit`]s directly
+/// by the contract, without needing to parse arbitrary `args`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProposalAction {
+    /// Transfer `amount` of `asset` to `to` via that asset's
+    /// `token::Client::transfer`. Subject to [`SpendingLimit`] checks if
+    /// one is configured for `asset`.
+    Transfer(TransferAction),
+    /// Arbitrary cross-contract invocation, for vault use cases beyond
+    /// simple transfers (e.g. voting in a DAO, staking, claiming rewards).
+    /// Not subject to spending-limit checks — vaults that want to restrict
+    /// this should omit signers who don't need it, or rely on the
+    /// threshold/timelock alone.
+    GenericInvoke(GenericInvokeAction),
+    /// Replace the vault's signer set and/or threshold. Executing this
+    /// action overwrites [`VaultConfig::signers`] and
+    /// [`VaultConfig::threshold`] in instance storage.
+    UpdateSigners(UpdateSignersAction),
+}
+
