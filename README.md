@@ -112,3 +112,44 @@ let proposal_id = client.propose(&alice, &action);
 // client.execute(&alice, &proposal_id);
 ```
 
+## Open Issues
+
+These are the primary places external contributors can add value right now.
+Each has a full doc-comment on the function in
+[`src/contract.rs`](src/contract.rs) spelling out the exact required steps
+and every error condition — read it before opening a PR, since these are
+security-sensitive entrypoints and the spec is deliberately precise.
+
+| Function | File | Suggested difficulty | What's involved |
+|---|---|---|---|
+| `approve` | `src/contract.rs` | **Medium** | The core M-of-N auth verification loop over the existing signer set |
+| `execute` | `src/contract.rs` | **High** (security-sensitive) | Timelock check + spending-limit enforcement + `ProposalAction` dispatch |
+| `deploy_vault` | `src/contract.rs` | **High** | Soroban's deployer/executable framework — deterministic child-contract deployment |
+
+Each has a matching `#[ignore]`d integration test in
+[`src/test.rs`](src/test.rs) sketching the expected flow — remove the
+`#[ignore]` and complete the assertions once your implementation lands.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow, coding
+conventions, and PR checklist — `execute` in particular moves real funds, so
+its PR checklist is stricter than usual.
+
+## Safety notes for reviewers
+
+- `overflow-checks = true` is set explicitly in `[profile.release]` in
+  `Cargo.toml` and must never be removed.
+- `execute` is the last line of defense before funds move — any
+  implementation must re-check the approval threshold and timelock
+  expiry at execution time, not merely trust that `approve` already
+  enforced them (see the doc-comment on `execute` for why this
+  defense-in-depth check matters).
+- `MAX_SIGNERS` (20) and `MAX_TIMELOCK_LEDGERS` bound the vault's
+  configuration space specifically to keep the M-of-N approval loop's
+  gas/CPU cost predictable and to prevent a misconfigured vault from
+  locking funds for an effectively unbounded duration — don't raise
+  either constant without re-evaluating why it was set where it is (see
+  [`src/types.rs`](src/types.rs)).
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE).
