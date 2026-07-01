@@ -82,3 +82,33 @@ logic is isolated in `storage.rs`, behind typed, storage-class-explicit
 accessors, so it's never ambiguous at a call site whether a piece of state
 is long-lived (instance) or ephemeral (temporary).
 
+## Quick start
+
+```bash
+cargo test                                                # full test suite
+cargo build --target wasm32-unknown-unknown --release     # deployable contract Wasm
+```
+
+## Usage sketch
+
+```rust
+// 1. Stand up a 2-of-3 vault with a ~5.5-day timelock (100,000 ledgers @ ~5s each)
+let signers = vec![&env, alice.clone(), bob.clone(), carol.clone()];
+client.initialize(&signers, &2u32, &100_000u32);
+
+// 2. Cap USDC outflow to 10,000 per rolling ~24h window
+client.configure_spending_limit(&alice, &usdc_token, &10_000_0000000i128, &17_280u32);
+
+// 3. Propose a transfer
+let action = ProposalAction::Transfer(TransferAction {
+    asset: usdc_token,
+    to: recipient,
+    amount: 5_000_0000000,
+});
+let proposal_id = client.propose(&alice, &action);
+
+// 4. (once implemented) collect approvals, wait out the timelock, execute
+// client.approve(&bob, &proposal_id);
+// client.execute(&alice, &proposal_id);
+```
+
