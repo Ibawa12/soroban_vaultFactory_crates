@@ -128,3 +128,99 @@ fn configure_spending_limit_rejects_non_signer() {
     assert_eq!(result, Err(Ok(VaultError::SignerNotFound)));
 }
 
+#[test]
+fn propose_by_signer_returns_incrementing_ids() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, signers) = setup(&env);
+    let action = ProposalAction::Transfer(TransferAction {
+        asset: Address::generate(&env),
+        to: Address::generate(&env),
+        amount: 500,
+    });
+
+    let first_id = client.propose(&signers.get_unchecked(0), &action.clone());
+    let second_id = client.propose(&signers.get_unchecked(1), &action);
+    assert_eq!(second_id, first_id + 1);
+}
+
+#[test]
+fn propose_rejects_non_signer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _signers) = setup(&env);
+    let stranger = Address::generate(&env);
+    let action = ProposalAction::Transfer(TransferAction {
+        asset: Address::generate(&env),
+        to: Address::generate(&env),
+        amount: 500,
+    });
+
+    let result = client.try_propose(&stranger, &action);
+    assert_eq!(result, Err(Ok(VaultError::SignerNotFound)));
+}
+
+// --- Contributor-facing entrypoint placeholders ----------------------------
+//
+// `approve`, `execute`, and `deploy_vault` currently panic via `todo!()`
+// (see `contract.rs`). These tests sketch the intended flow and are marked
+// `#[ignore]` so CI stays green; once an issue lands an implementation,
+// remove the `#[ignore]` and flesh out the assertions.
+
+#[test]
+#[ignore = "VaultFactory::approve is an open contributor issue"]
+fn approve_transitions_proposal_to_ready_once_threshold_met() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, signers) = setup(&env);
+    let action = ProposalAction::Transfer(TransferAction {
+        asset: Address::generate(&env),
+        to: Address::generate(&env),
+        amount: 500,
+    });
+    let id = client.propose(&signers.get_unchecked(0), &action);
+
+    client.approve(&signers.get_unchecked(0), &id);
+    client.approve(&signers.get_unchecked(1), &id);
+    // Once implemented: assert the proposal's status is now `Ready`.
+}
+
+#[test]
+#[ignore = "VaultFactory::execute is an open contributor issue"]
+fn execute_rejects_before_timelock_elapses() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, signers) = setup(&env);
+    let action = ProposalAction::Transfer(TransferAction {
+        asset: Address::generate(&env),
+        to: Address::generate(&env),
+        amount: 500,
+    });
+    let id = client.propose(&signers.get_unchecked(0), &action);
+    client.approve(&signers.get_unchecked(0), &id);
+    client.approve(&signers.get_unchecked(1), &id);
+
+    let result = client.try_execute(&signers.get_unchecked(0), &id);
+    assert_eq!(result, Err(Ok(VaultError::TimelockNotExpired)));
+}
+
+#[test]
+#[ignore = "VaultFactory::deploy_vault is an open contributor issue"]
+fn deploy_vault_returns_a_freshly_initialized_child_vault() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, signers) = setup(&env);
+    // Once implemented, replace this with a real uploaded WASM hash via
+    // `env.deployer().upload_contract_wasm(WASM_BYTES)` (e.g. this same
+    // contract's own compiled output, for a self-similar factory).
+    let wasm_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    let salt = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+
+    let _child = client.deploy_vault(
+        &wasm_hash,
+        &salt,
+        &signers,
+        &DEFAULT_THRESHOLD,
+        &DEFAULT_TIMELOCK_BLOCKS,
+    );
+}
