@@ -52,3 +52,49 @@ pub enum InstanceDataKey {
     SpendingLimit(Address),
 }
 
+/// Keys for values held in **temporary** storage.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TemporaryDataKey {
+    /// -> [`Proposal`], keyed by [`Proposal::id`].
+    Proposal(u64),
+    /// -> [`SpendingUsage`], keyed by the asset (token contract address)
+    /// it accumulates usage for.
+    SpendingUsage(Address),
+}
+
+/// Returns `true` if `initialize` has already run on this contract
+/// instance.
+pub fn has_config(env: &Env) -> bool {
+    env.storage().instance().has(&InstanceDataKey::Config)
+}
+
+/// Loads the vault's [`VaultConfig`], bumping the instance TTL on read.
+///
+/// # Errors
+/// [`VaultError::NotInitialized`] if `initialize` has not yet run.
+pub fn get_config(env: &Env) -> Result<VaultConfig, VaultError> {
+    bump_instance(env);
+    env.storage()
+        .instance()
+        .get(&InstanceDataKey::Config)
+        .ok_or(VaultError::NotInitialized)
+}
+
+/// Persists `config` to instance storage, overwriting any prior value.
+pub fn set_config(env: &Env, config: &VaultConfig) {
+    env.storage().instance().set(&InstanceDataKey::Config, config);
+    bump_instance(env);
+}
+
+/// Atomically allocates and returns the next [`Proposal`] id, persisting
+/// the incremented counter back to instance storage.
+pub fn next_proposal_id(env: &Env) -> u64 {
+    let key = InstanceDataKey::ProposalCounter;
+    let current: u64 = env.storage().instance().get(&key).unwrap_or(0);
+    let next = current + 1;
+    env.storage().instance().set(&key, &next);
+    bump_instance(env);
+    current
+}
+
