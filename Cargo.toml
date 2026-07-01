@@ -1,0 +1,40 @@
+[package]
+name = "soroban-VaultFactory"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/YOUR_ORG/soroban-VaultFactory"
+publish = false
+description = "Multi-sig & timelock vault factory for Soroban, with M-of-N auth, block-based timelocks, and value-based dynamic spending limits."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { version = "23", features = ["alloc"] }
+
+[dev-dependencies]
+soroban-sdk = { version = "23", features = ["testutils"] }
+
+[features]
+testutils = ["soroban-sdk/testutils"]
+
+# Optimized profile for on-chain Wasm builds. `overflow-checks = true` is
+# deliberate: spending-limit and proposal-id arithmetic relies on panicking
+# on overflow rather than silently wrapping, so this must never be turned off.
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+strip = "symbols"
+
+# Same as release but keeps debug assertions/logs for diagnosing contract
+# panics during integration testing on testnet.
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true
