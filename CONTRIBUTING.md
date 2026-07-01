@@ -98,3 +98,43 @@ requesting review:
 
 ## PR checklist
 
+- [ ] Linked to (or created) the tracking issue
+- [ ] Implementation matches the doc-comment's specified steps and error
+      conditions, or the doc-comment was updated to match a deliberate,
+      discussed deviation
+- [ ] Every new state-mutating path calls `require_auth()` before mutating
+      anything
+- [ ] New/updated tests in `src/test.rs`, covering the golden path and
+      every documented error condition
+- [ ] Corresponding `#[ignore]` removed with real assertions
+- [ ] `cargo test` passes locally
+- [ ] `cargo build --target wasm32-unknown-unknown --release` succeeds
+- [ ] No new `unwrap()`/`expect()`/`panic!()` — every failure path returns
+      `Result<T, VaultError>`
+- [ ] No `soroban_sdk::Val` introduced into a persisted (`#[contracttype]`)
+      struct
+
+### Additional checklist for `execute` specifically
+
+- [ ] Re-validates approval threshold and timelock expiry at execution
+      time, independent of whatever `approve` already checked
+      (defense-in-depth — see the `execute` doc-comment)
+- [ ] Spending-limit rollover logic correctly handles a period boundary
+      falling exactly on the current ledger, not just "sometime after"
+- [ ] Includes a test where `execute` is attempted twice on the same
+      proposal (must fail the second time)
+
+## Commit / PR style
+
+- Commit messages: imperative mood, explain *why* over *what* where it's
+  not obvious from the diff.
+- Keep the PR description focused on: what entrypoint/bug this addresses,
+  what testing you did, and any deliberate deviation from the doc-comment
+  spec.
+
+## Getting help
+
+If you're unsure about an approach before investing the time to implement
+it — especially for `execute`, where a wrong assumption is expensive to
+unwind in review — open a draft PR or a discussion issue describing your
+plan first.
