@@ -24,3 +24,6 @@ use crate::types::{
     ProposalAction, ProposalStatus, SpendingLimit, VaultConfig, MAX_SIGNERS, MAX_TIMELOCK_LEDGERS,
 };
 
+#[contract]
+pub struct VaultFactory;
+
