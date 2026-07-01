@@ -36,3 +36,65 @@ cargo test                                  # Env-based integration tests
 cargo build --target wasm32-unknown-unknown --release   # the deployable artifact
 ```
 
+No other tooling is required to get started. If you also want to exercise
+the contract via the Soroban CLI (`stellar contract deploy`, invoking it
+against a local/testnet network), see the
+[Soroban CLI docs](https://developers.stellar.org/docs/tools/developer-tools#cli)
+— optional for contract-logic contributions.
+
+## Coding conventions
+
+These are enforced in review, not by CI alone, so please self-check before
+requesting review:
+
+- **Every state-mutating entrypoint calls `require_auth()` on the
+  address it claims to act as, before doing anything else.** This is the
+  entire basis of the contract's security model — see `initialize`,
+  `configure_spending_limit`, and `propose` in `src/contract.rs` for the
+  established pattern (auth check → validate → load/mutate state via
+  `crate::storage` → persist).
+- **Never introduce a bare `panic!`.** Every fallible entrypoint returns
+  `Result<T, VaultError>`. If your change hits a new failure mode not
+  already covered by [`VaultError`](src/errors.rs), add a variant in the
+  appropriate section (rather than overloading an existing one) with a
+  discriminant one higher than the current maximum in that section, and
+  document what triggers it.
+- **Respect the instance vs. temporary storage split.** Long-lived
+  configuration (`VaultConfig`, `SpendingLimit`) belongs in instance
+  storage; ephemeral, naturally-expiring state (`Proposal`,
+  `SpendingUsage`) belongs in temporary storage. See the module doc-comment
+  in [`src/storage.rs`](src/storage.rs) for the full rationale — if you're
+  tempted to put a new piece of state in instance storage "to be safe,"
+  read that rationale first.
+- **Never store a `soroban_sdk::Val` in a persisted type.** It's a
+  handle into the current host invocation frame and doesn't survive across
+  transactions. See the doc-comment on `GenericInvokeAction` in
+  [`src/types.rs`](src/types.rs) for the XDR-bytes pattern used instead.
+- **Enum variants needing more than one field wrap a dedicated struct**,
+  because Soroban's `#[contracttype]` derive doesn't support multi-field
+  struct variants. Follow the `TransferAction`/`GenericInvokeAction`/
+  `UpdateSignersAction` pattern in `src/types.rs` for any new
+  `ProposalAction` variant.
+- **Checked arithmetic only** on any `i128` amount — never bare `+`/`*`/`-`.
+- **No unrelated formatting churn.** Run `cargo fmt` on files you actually
+  touched; don't reformat files you didn't otherwise change.
+
+## Testing requirements
+
+- Add unit/integration tests in [`src/test.rs`](src/test.rs) following the
+  existing `setup()`/`setup_uninitialized()` harness pattern — every test
+  should register a fresh contract instance rather than sharing state
+  across tests.
+- Cover the golden path **and** every documented error condition for the
+  entrypoint you're implementing (e.g. for `execute`: successful dispatch
+  of each `ProposalAction` variant, `TimelockNotExpired`,
+  `InsufficientApprovals`, `SpendingLimitExceeded`).
+- Remove the `#[ignore = "..."]` attribute from the corresponding
+  placeholder test in `src/test.rs` and complete its assertions once your
+  implementation is in — those tests currently exist specifically as your
+  target.
+- Run `cargo test` (not just `cargo check`) before opening a PR. All
+  existing tests must still pass.
+
+## PR checklist
+
