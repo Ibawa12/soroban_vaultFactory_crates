@@ -153,3 +153,56 @@ pub enum ProposalAction {
     UpdateSigners(UpdateSignersAction),
 }
 
+/// Lifecycle state of a [`Proposal`]. Transitions are strictly one-way:
+/// `Pending -> Ready -> Executed`, with `Cancelled` reachable from
+/// `Pending` or `Ready` only.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProposalStatus {
+    /// Collecting signer approvals; has not yet reached
+    /// `VaultConfig::threshold` distinct approvals.
+    Pending,
+    /// Reached threshold approvals; waiting out `executable_after_ledger`
+    /// before it can be executed.
+    Ready,
+    /// Successfully executed; terminal state.
+    Executed,
+    /// Withdrawn by a signer (or superseded) before execution; terminal
+    /// state.
+    Cancelled,
+}
+
+/// A single proposed [`ProposalAction`], tracked in **temporary** storage
+/// keyed by `id` (see [`crate::storage::TemporaryDataKey::Proposal`]).
+///
+/// Proposals live in temporary storage rather than instance storage
+/// deliberately: an executed or cancelled proposal has no further
+/// relevance to contract logic and should not accumulate in instance
+/// storage indefinitely (which would grow the vault's instance footprint,
+/// and therefore every unrelated invocation's base instance-read cost,
+/// without bound).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Proposal {
+    /// Monotonically increasing id, assigned from the instance-storage
+    /// counter at [`crate::storage::InstanceDataKey::ProposalCounter`].
+    pub id: u64,
+    /// The signer who submitted the proposal. Submitting does not count
+    /// as an implicit approval — the proposer must still separately
+    /// approve like any other signer if they want their approval counted.
+    pub proposer: Address,
+    /// The effect this proposal will have if executed.
+    pub action: ProposalAction,
+    /// Distinct signer addresses that have approved so far. Bounded by
+    /// [`MAX_SIGNERS`], same as `VaultConfig::signers`.
+    pub approvals: Vec<Address>,
+    /// Ledger sequence number the proposal was created at.
+    pub created_at_ledger: u32,
+    /// Ledger sequence number at/after which the proposal becomes
+    /// executable, snapshotted from `VaultConfig::timelock_blocks` at
+    /// creation time (see [`VaultConfig::timelock_blocks`] doc-comment for
+    /// why this is snapshotted rather than read live).
+    pub executable_after_ledger: u32,
+    /// Current lifecycle state.
+    pub status: ProposalStatus,
+}
