@@ -18,3 +18,9 @@
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, Vec};
 
+use crate::errors::VaultError;
+use crate::storage;
+use crate::types::{
+    ProposalAction, ProposalStatus, SpendingLimit, VaultConfig, MAX_SIGNERS, MAX_TIMELOCK_LEDGERS,
+};
+
