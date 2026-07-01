@@ -46,3 +46,85 @@ fn setup(env: &Env) -> (VaultFactoryClient<'static>, soroban_sdk::Vec<Address>) 
     (client, signers)
 }
 
+#[test]
+fn initialize_succeeds_with_valid_config() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, signers) = setup_uninitialized(&env);
+
+    client.initialize(&signers, &DEFAULT_THRESHOLD, &DEFAULT_TIMELOCK_BLOCKS);
+    // A second call must fail: the vault is already initialized.
+    let result = client.try_initialize(&signers, &DEFAULT_THRESHOLD, &DEFAULT_TIMELOCK_BLOCKS);
+    assert_eq!(result, Err(Ok(VaultError::AlreadyInitialized)));
+}
+
+#[test]
+fn initialize_rejects_empty_signer_set() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _signers) = setup_uninitialized(&env);
+    let empty: soroban_sdk::Vec<Address> = vec![&env];
+
+    let result = client.try_initialize(&empty, &1, &DEFAULT_TIMELOCK_BLOCKS);
+    assert_eq!(result, Err(Ok(VaultError::EmptySignerSet)));
+}
+
+#[test]
+fn initialize_rejects_duplicate_signers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _signers) = setup_uninitialized(&env);
+    let signer = Address::generate(&env);
+    let duplicated = vec![&env, signer.clone(), signer];
+
+    let result = client.try_initialize(&duplicated, &1, &DEFAULT_TIMELOCK_BLOCKS);
+    assert_eq!(result, Err(Ok(VaultError::DuplicateSigner)));
+}
+
+#[test]
+fn initialize_rejects_threshold_above_signer_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, signers) = setup_uninitialized(&env);
+
+    let result = client.try_initialize(&signers, &(signers.len() + 1), &DEFAULT_TIMELOCK_BLOCKS);
+    assert_eq!(result, Err(Ok(VaultError::InvalidThreshold)));
+}
+
+#[test]
+fn initialize_rejects_timelock_beyond_ceiling() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, signers) = setup_uninitialized(&env);
+
+    let result = client.try_initialize(
+        &signers,
+        &DEFAULT_THRESHOLD,
+        &(crate::types::MAX_TIMELOCK_LEDGERS + 1),
+    );
+    assert_eq!(result, Err(Ok(VaultError::InvalidTimelockDuration)));
+}
+
+#[test]
+fn configure_spending_limit_by_current_signer_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, signers) = setup(&env);
+    let asset = Address::generate(&env);
+
+    client.configure_spending_limit(&signers.get_unchecked(0), &asset, &1_000_000i128, &17_280u32);
+}
+
+#[test]
+fn configure_spending_limit_rejects_non_signer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _signers) = setup(&env);
+    let asset = Address::generate(&env);
+    let stranger = Address::generate(&env);
+
+    let result =
+        client.try_configure_spending_limit(&stranger, &asset, &1_000_000i128, &17_280u32);
+    assert_eq!(result, Err(Ok(VaultError::SignerNotFound)));
+}
+
