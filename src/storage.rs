@@ -131,3 +131,62 @@ pub fn bump_instance(env: &Env) {
         .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_TO);
 }
 
+/// Loads the [`Proposal`] with the given `id` from temporary storage,
+/// bumping its TTL on read.
+///
+/// # Errors
+/// [`VaultError::ProposalNotFound`] if no such proposal exists — either it
+/// was never created, or its temporary-storage TTL has already lapsed and
+/// the host evicted it.
+pub fn get_proposal(env: &Env, id: u64) -> Result<Proposal, VaultError> {
+    let key = TemporaryDataKey::Proposal(id);
+    let proposal = env
+        .storage()
+        .temporary()
+        .get(&key)
+        .ok_or(VaultError::ProposalNotFound)?;
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, TEMPORARY_BUMP_THRESHOLD, TEMPORARY_BUMP_TO);
+    Ok(proposal)
+}
+
+/// Persists `proposal` to temporary storage under `proposal.id`,
+/// overwriting any prior value, and (re-)sets its TTL.
+pub fn set_proposal(env: &Env, proposal: &Proposal) {
+    let key = TemporaryDataKey::Proposal(proposal.id);
+    env.storage().temporary().set(&key, proposal);
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, TEMPORARY_BUMP_THRESHOLD, TEMPORARY_BUMP_TO);
+}
+
+/// Removes a [`Proposal`] from temporary storage (e.g. once executed or
+/// cancelled, if the caller wants to reclaim the slot rather than let it
+/// expire naturally).
+pub fn remove_proposal(env: &Env, id: u64) {
+    env.storage().temporary().remove(&TemporaryDataKey::Proposal(id));
+}
+
+/// Loads the current [`SpendingUsage`] window for `asset`, if the host
+/// still has one live in temporary storage (a lapsed/evicted entry is
+/// indistinguishable from "no spending yet this period" and callers should
+/// treat `None` as a fresh window).
+pub fn get_spending_usage(env: &Env, asset: &Address) -> Option<SpendingUsage> {
+    let key = TemporaryDataKey::SpendingUsage(asset.clone());
+    let usage = env.storage().temporary().get(&key)?;
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, TEMPORARY_BUMP_THRESHOLD, TEMPORARY_BUMP_TO);
+    Some(usage)
+}
+
+/// Persists `usage` to temporary storage for `asset`, overwriting any
+/// prior value, and (re-)sets its TTL.
+pub fn set_spending_usage(env: &Env, asset: &Address, usage: &SpendingUsage) {
+    let key = TemporaryDataKey::SpendingUsage(asset.clone());
+    env.storage().temporary().set(&key, usage);
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, TEMPORARY_BUMP_THRESHOLD, TEMPORARY_BUMP_TO);
+}
