@@ -273,3 +273,22 @@ impl VaultFactory {
     }
 }
 
+/// Shared validation for a candidate signer set: non-empty, no duplicates,
+/// within [`MAX_SIGNERS`]. Used by both `initialize` and (once
+/// implemented) the `UpdateSigners` branch of [`VaultFactory::execute`].
+fn validate_signer_set(signers: &Vec<Address>) -> Result<(), VaultError> {
+    if signers.is_empty() {
+        return Err(VaultError::EmptySignerSet);
+    }
+    if signers.len() > MAX_SIGNERS {
+        return Err(VaultError::InvalidThreshold);
+    }
+    for i in 0..signers.len() {
+        for j in (i + 1)..signers.len() {
+            if signers.get_unchecked(i) == signers.get_unchecked(j) {
+                return Err(VaultError::DuplicateSigner);
+            }
+        }
+    }
+    Ok(())
+}
