@@ -16,3 +16,57 @@ use soroban_sdk::{contracttype, Address, Bytes, Symbol, Vec};
 /// effectively unbounded duration.
 pub const MAX_TIMELOCK_LEDGERS: u32 = 6_307_200;
 
+/// Maximum number of signers a single vault may configure. Bounded so that
+/// the M-of-N approval loop (a linear scan over `signers` per proposal
+/// approval) stays within predictable gas/CPU-instruction budgets.
+pub const MAX_SIGNERS: u32 = 20;
+
+/// The durable, instance-storage configuration of a single vault: its
+/// signer set, approval threshold, and default timelock delay.
+///
+/// This is written once by `initialize` and thereafter only mutated by a
+/// successfully executed [`ProposalAction::UpdateSigners`] proposal — never
+/// by a direct, unauthenticated setter.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VaultConfig {
+    /// The current set of addresses authorized to approve proposals.
+    /// Order is insertion order and carries no privilege semantics.
+    pub signers: Vec<Address>,
+    /// Number of distinct signer approvals required before a proposal
+    /// transitions from `Pending` to `Ready` (the "M" in M-of-N).
+    pub threshold: u32,
+    /// Default number of ledgers a newly created proposal must wait
+    /// between reaching `threshold` approvals and becoming executable.
+    /// Individual proposals snapshot this into their own
+    /// `executable_after_ledger` at creation time, so a later config
+    /// change never retroactively affects an in-flight proposal.
+    pub timelock_blocks: u32,
+    /// Ledger sequence number at which this vault was initialized.
+    pub created_at_ledger: u32,
+}
+
+/// A per-asset, per-period spending ceiling enforced independently of the
+/// multisig/timelock flow — e.g. to let a vault permit small, frequent
+/// transfers without a full proposal round-trip in a future fast-path, or
+/// simply to cap the blast radius of any single approved proposal.
+///
+/// Stored in **instance** storage (it is long-lived configuration), while
+/// the *usage* counter tracking consumption against this limit
+/// ([`SpendingUsage`]) lives in **temporary** storage since it is an
+/// ephemeral, period-scoped accumulator that should naturally expire.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpendingLimit {
+    /// The token contract address this limit applies to.
+    pub asset: Address,
+    /// Maximum total amount (in the asset's native, unscaled integer
+    /// units — the same units `token::Client::transfer` expects) that may
+    /// be transferred out within any single rolling window of
+    /// `period_ledgers`.
+    pub limit_per_period: i128,
+    /// Length, in ledgers, of the rolling window `limit_per_period`
+    /// applies to.
+    pub period_ledgers: u32,
+}
+
