@@ -1,5 +1,8 @@
 # soroban-VaultFactory
 
+[![CI](https://github.com/Ibawa12/soroban_vaultFactory_crates/actions/workflows/ci.yml/badge.svg)](https://github.com/Ibawa12/soroban_vaultFactory_crates/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 A multi-signature & timelock vault contract for
 [Soroban](https://developers.stellar.org/docs/build/smart-contracts/overview),
 built on Soroban's native `auth` framework — customizable M-of-N

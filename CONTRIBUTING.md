@@ -44,8 +44,10 @@ against a local/testnet network), see the
 
 ## Coding conventions
 
-These are enforced in review, not by CI alone, so please self-check before
-requesting review:
+CI (`.github/workflows/ci.yml`) enforces `cargo fmt --check`, `cargo clippy
+-- -D warnings`, `cargo test`, and the `wasm32-unknown-unknown` release
+build on every push and PR. The rest of these are enforced in review, so
+please self-check before requesting it:
 
 - **Every state-mutating entrypoint calls `require_auth()` on the
   address it claims to act as, before doing anything else.** This is the
