@@ -83,7 +83,9 @@ pub fn get_config(env: &Env) -> Result<VaultConfig, VaultError> {
 
 /// Persists `config` to instance storage, overwriting any prior value.
 pub fn set_config(env: &Env, config: &VaultConfig) {
-    env.storage().instance().set(&InstanceDataKey::Config, config);
+    env.storage()
+        .instance()
+        .set(&InstanceDataKey::Config, config);
     bump_instance(env);
 }
 
@@ -165,7 +167,9 @@ pub fn set_proposal(env: &Env, proposal: &Proposal) {
 /// cancelled, if the caller wants to reclaim the slot rather than let it
 /// expire naturally).
 pub fn remove_proposal(env: &Env, id: u64) {
-    env.storage().temporary().remove(&TemporaryDataKey::Proposal(id));
+    env.storage()
+        .temporary()
+        .remove(&TemporaryDataKey::Proposal(id));
 }
 
 /// Loads the current [`SpendingUsage`] window for `asset`, if the host

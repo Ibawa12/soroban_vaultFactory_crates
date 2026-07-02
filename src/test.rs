@@ -112,7 +112,12 @@ fn configure_spending_limit_by_current_signer_succeeds() {
     let (client, signers) = setup(&env);
     let asset = Address::generate(&env);
 
-    client.configure_spending_limit(&signers.get_unchecked(0), &asset, &1_000_000i128, &17_280u32);
+    client.configure_spending_limit(
+        &signers.get_unchecked(0),
+        &asset,
+        &1_000_000i128,
+        &17_280u32,
+    );
 }
 
 #[test]
@@ -123,8 +128,7 @@ fn configure_spending_limit_rejects_non_signer() {
     let asset = Address::generate(&env);
     let stranger = Address::generate(&env);
 
-    let result =
-        client.try_configure_spending_limit(&stranger, &asset, &1_000_000i128, &17_280u32);
+    let result = client.try_configure_spending_limit(&stranger, &asset, &1_000_000i128, &17_280u32);
     assert_eq!(result, Err(Ok(VaultError::SignerNotFound)));
 }
 

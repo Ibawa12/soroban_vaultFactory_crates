@@ -268,7 +268,14 @@ impl VaultFactory {
         threshold: u32,
         timelock_blocks: u32,
     ) -> Result<Address, VaultError> {
-        let _ = (&env, &wasm_hash, &salt, &signers, threshold, timelock_blocks);
+        let _ = (
+            &env,
+            &wasm_hash,
+            &salt,
+            &signers,
+            threshold,
+            timelock_blocks,
+        );
         todo!("Deterministic child-contract deployment via env.deployer() — see doc-comment for the exact required steps")
     }
 }
