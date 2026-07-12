@@ -18,6 +18,43 @@ contract treats all three — multisig, timelock, and spending limits — as
 first-class, independently configurable primitives rather than bolting the
 last two on as an afterthought.
 
+## The problem this solves in the Soroban ecosystem
+
+Custody is the first question any team, DAO, or protocol treasury has to
+answer before it can hold funds on Stellar/Soroban at all, and today the
+ecosystem has no canonical answer to point to. The practical alternatives
+are:
+
+- **A single EOA-equivalent signer.** Fast, but a single compromised key
+  (or single point of human error) is a total loss. Not a serious option
+  for anything beyond a hobby project.
+- **Rolling a bespoke multisig contract per team.** This is what actually
+  happens today, and it means the same security-critical logic — signature
+  threshold checks, replay protection, upgrade paths — gets written and
+  audited independently by every team that needs it, with wildly varying
+  levels of rigor depending on who's building it and how much runway they
+  have for a security review.
+- **Importing a multisig pattern designed for a different chain.** EVM
+  multisig patterns (Gnosis Safe and its many derivatives) don't map
+  cleanly onto Soroban's native `auth` framework, storage-TTL model, or
+  resource-metered execution — a naive port either fights the platform or
+  quietly reintroduces assumptions that don't hold here.
+
+What's specifically missing beyond plain threshold signatures is just as
+important: **a mandatory delay between "enough signers approved" and "funds
+actually move."** Without a timelock, a compromised or colluding majority
+of signers can drain a treasury before anyone watching has a chance to
+react. And without **per-asset spending limits**, every single payout — no
+matter how small or routine — has to go through the exact same
+full-weight governance process as a treasury-emptying transfer, which
+either slows an organization down or (more likely, in practice) trains
+signers to rubber-stamp proposals they haven't actually reviewed.
+
+`soroban-VaultFactory` exists to make "multisig + timelock + spending
+limits, correctly composed, on native Soroban `auth`" a reusable primitive
+instead of something every serious Stellar treasury, DAO, or protocol
+reimplements — and re-discovers the same edge cases in — on its own.
+
 ## Status
 
 **Early-stage / actively looking for contributors.** Vault initialization,
@@ -152,6 +189,13 @@ its PR checklist is stricter than usual.
   locking funds for an effectively unbounded duration — don't raise
   either constant without re-evaluating why it was set where it is (see
   [`src/types.rs`](src/types.rs)).
+
+## Security
+
+Found a suspected vulnerability — especially anything touching
+authorization, the timelock, or spending limits? Please don't open a
+public issue — see [SECURITY.md](SECURITY.md) for the private reporting
+process, response targets, and what's in/out of scope.
 
 ## License
 
