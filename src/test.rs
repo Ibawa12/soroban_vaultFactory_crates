@@ -367,25 +367,62 @@ fn execute_applies_update_signers_action() {
 
 // --- deploy_vault --------------------------------------------------------
 
+/// This crate's own compiled Wasm — used to test `deploy_vault` by having
+/// the factory deploy another instance of itself, which is both a
+/// realistic exercise of the deployer API and avoids needing a separate
+/// fixture contract. Built by the `wasm-build` step the `test` CI job now
+/// runs before `cargo test` (see `.github/workflows/ci.yml`); if you're
+/// running this test locally, run
+/// `cargo build --target wasm32v1-none --release` first. Deliberately
+/// `wasm32v1-none`, not `wasm32-unknown-unknown` — see the comment on
+/// `targets` in `rust-toolchain.toml`.
+const VAULT_FACTORY_WASM: &[u8] =
+    include_bytes!("../target/wasm32v1-none/release/soroban_VaultFactory.wasm");
+
 #[test]
-#[ignore = "needs a real uploaded wasm fixture, not this placeholder all-zero hash — see the next commit"]
 fn deploy_vault_returns_a_freshly_initialized_child_vault() {
     let env = Env::default();
-    env.mock_all_auths();
+    // deploy_vault's cross-contract call into the freshly-deployed
+    // child's own `initialize` triggers `signer.require_auth()` calls
+    // that aren't tied to this test's root invocation (`deploy_vault`
+    // itself) — plain `mock_all_auths()` won't mock those; this variant
+    // is needed to authorize auth checks at any call depth.
+    env.mock_all_auths_allowing_non_root_auth();
     let (client, signers) = setup(&env);
-    // This needs a real uploaded WASM hash via
-    // `env.deployer().upload_contract_wasm(WASM_BYTES)` (e.g. this same
-    // contract's own compiled output, for a self-similar factory) —
-    // deploy_vault legitimately panics against an unknown hash like this
-    // one, since Soroban's deployer API doesn't offer a checked variant.
-    let wasm_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    let wasm_hash = env.deployer().upload_contract_wasm(VAULT_FACTORY_WASM);
     let salt = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
 
-    let _child = client.deploy_vault(
+    let child_address = client.deploy_vault(
         &wasm_hash,
         &salt,
         &signers,
         &DEFAULT_THRESHOLD,
         &DEFAULT_TIMELOCK_BLOCKS,
     );
+    assert_ne!(child_address, client.address);
+
+    // The child is a fully separate, already-initialized vault instance —
+    // proven the same way `initialize_succeeds_with_valid_config` proves
+    // it for the top-level `setup()` vault: a second `initialize` call
+    // must now fail.
+    let child_client = VaultFactoryClient::new(&env, &child_address);
+    let result =
+        child_client.try_initialize(&signers, &DEFAULT_THRESHOLD, &DEFAULT_TIMELOCK_BLOCKS);
+    assert_eq!(result, Err(Ok(VaultError::AlreadyInitialized)));
+}
+
+#[test]
+fn deploy_vault_reports_deployment_failed_for_an_uninitializable_config() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _signers) = setup(&env);
+    let wasm_hash = env.deployer().upload_contract_wasm(VAULT_FACTORY_WASM);
+    let salt = soroban_sdk::BytesN::from_array(&env, &[2u8; 32]);
+    let empty: soroban_sdk::Vec<Address> = vec![&env];
+
+    // An empty signer set fails the child's own `initialize` validation;
+    // deploy_vault must surface that as DeploymentFailed rather than
+    // leaving a half-initialized (or un-initializable) vault reachable.
+    let result = client.try_deploy_vault(&wasm_hash, &salt, &empty, &1, &DEFAULT_TIMELOCK_BLOCKS);
+    assert_eq!(result, Err(Ok(VaultError::DeploymentFailed)));
 }
