@@ -16,12 +16,15 @@
 //! | [`VaultFactory::execute`]     | High (timelock + spending-limit + action dispatch, security-sensitive) |
 //! | [`VaultFactory::deploy_vault`] | High (cross-contract deployer, WASM hash validation) |
 
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, Vec};
+use soroban_sdk::token::TokenClient;
+use soroban_sdk::xdr::FromXdr;
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, MuxedAddress, Val, Vec};
 
 use crate::errors::VaultError;
 use crate::storage;
 use crate::types::{
-    ProposalAction, ProposalStatus, SpendingLimit, VaultConfig, MAX_SIGNERS, MAX_TIMELOCK_LEDGERS,
+    ProposalAction, ProposalStatus, SpendingLimit, SpendingUsage, VaultConfig, MAX_SIGNERS,
+    MAX_TIMELOCK_LEDGERS,
 };
 
 #[contract]
@@ -187,35 +190,14 @@ impl VaultFactory {
     /// [`ProposalStatus::Ready`] and its timelock has elapsed, dispatching
     /// on its [`ProposalAction`] variant.
     ///
-    /// # Target implementation
-    /// Tracked as a **security-sensitive** open contributor issue. It
-    /// must, in order:
-    /// 1. Load the [`crate::types::Proposal`] by `proposal_id` (else
-    ///    [`VaultError::ProposalNotFound`]).
-    /// 2. Confirm `status == Ready` (else
-    ///    [`VaultError::ProposalNotReady`]).
-    /// 3. Confirm `env.ledger().sequence() >= proposal.executable_after_ledger`
-    ///    (else [`VaultError::TimelockNotExpired`]).
-    /// 4. Confirm `proposal.approvals.len() >= config.threshold` as a
-    ///    defense-in-depth re-check (the `Ready` transition in
-    ///    [`VaultFactory::approve`] should already guarantee this, but
-    ///    execution is the last line of defense before funds move).
-    /// 5. Dispatch on `proposal.action`:
-    ///    - `Transfer { asset, to, amount }`: if a [`SpendingLimit`] is
-    ///      configured for `asset`, load/roll over the
-    ///      [`crate::types::SpendingUsage`] window (via
-    ///      `env.ledger().sequence()` vs
-    ///      `SpendingUsage::period_start_ledger` +
-    ///      `SpendingLimit::period_ledgers`) and reject with
-    ///      [`VaultError::SpendingLimitExceeded`] if `spent + amount`
-    ///      would exceed `limit_per_period`; otherwise record the usage
-    ///      and invoke the token contract's `transfer`.
-    ///    - `GenericInvoke { contract, function, args }`: invoke via
-    ///      `env.invoke_contract`.
-    ///    - `UpdateSigners { signers, threshold }`: re-validate via the
-    ///      same rules as [`VaultFactory::initialize`] and overwrite
-    ///      [`VaultConfig`] in instance storage.
-    /// 6. Transition `proposal.status` to `Executed` and persist.
+    /// Execution itself is intentionally permissionless: `executor` is not
+    /// required to be a current signer and is not auth-checked. The
+    /// multisig/timelock gate on the *proposal* is what authorizes the
+    /// underlying action; requiring a specific caller to also submit the
+    /// execution transaction would only add friction (e.g. a "keeper" or
+    /// off-chain relayer submitting on a signer's behalf) without adding
+    /// security, since `execute` re-validates `Ready` status, the timelock,
+    /// and the approval count itself before doing anything irreversible.
     ///
     /// # Errors
     /// - [`VaultError::NotInitialized`]
@@ -223,12 +205,80 @@ impl VaultFactory {
     /// - [`VaultError::ProposalNotReady`]
     /// - [`VaultError::TimelockNotExpired`]
     /// - [`VaultError::InsufficientApprovals`]
-    /// - [`VaultError::SpendingLimitNotConfigured`] /
-    ///   [`VaultError::SpendingLimitExceeded`]
+    /// - [`VaultError::SpendingLimitExceeded`]
     /// - [`VaultError::ArithmeticError`]
+    /// - [`VaultError::InvalidActionPayload`] (a `GenericInvoke` argument
+    ///   fails to decode back into a `Val`)
+    /// - [`VaultError::EmptySignerSet`], [`VaultError::DuplicateSigner`],
+    ///   [`VaultError::InvalidThreshold`] (an `UpdateSigners` action whose
+    ///   payload fails the same validation `initialize` applies)
     pub fn execute(env: Env, executor: Address, proposal_id: u64) -> Result<(), VaultError> {
-        let _ = (&env, &executor, proposal_id);
-        todo!("Timelock + spending-limit enforcement + action dispatch — see doc-comment for the exact required steps")
+        let _ = &executor;
+        let config = storage::get_config(&env)?;
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
+
+        if proposal.status != ProposalStatus::Ready {
+            return Err(VaultError::ProposalNotReady);
+        }
+        if env.ledger().sequence() < proposal.executable_after_ledger {
+            return Err(VaultError::TimelockNotExpired);
+        }
+        if proposal.approvals.len() < config.threshold {
+            return Err(VaultError::InsufficientApprovals);
+        }
+
+        match &proposal.action {
+            ProposalAction::Transfer(transfer) => {
+                if let Some(limit) = storage::get_spending_limit(&env, &transfer.asset) {
+                    let current_ledger = env.ledger().sequence();
+                    let mut usage = storage::get_spending_usage(&env, &transfer.asset)
+                        .filter(|u| current_ledger < u.period_start_ledger + limit.period_ledgers)
+                        .unwrap_or(SpendingUsage {
+                            spent: 0,
+                            period_start_ledger: current_ledger,
+                        });
+                    let new_spent = usage
+                        .spent
+                        .checked_add(transfer.amount)
+                        .ok_or(VaultError::ArithmeticError)?;
+                    if new_spent > limit.limit_per_period {
+                        return Err(VaultError::SpendingLimitExceeded);
+                    }
+                    usage.spent = new_spent;
+                    storage::set_spending_usage(&env, &transfer.asset, &usage);
+                }
+                let token = TokenClient::new(&env, &transfer.asset);
+                let to: MuxedAddress = transfer.to.clone().into();
+                token.transfer(&env.current_contract_address(), &to, &transfer.amount);
+            }
+            ProposalAction::GenericInvoke(invoke) => {
+                let mut args: Vec<Val> = Vec::new(&env);
+                for arg_bytes in invoke.args.iter() {
+                    let arg = Val::from_xdr(&env, &arg_bytes)
+                        .map_err(|_| VaultError::InvalidActionPayload)?;
+                    args.push_back(arg);
+                }
+                let _: Val = env.invoke_contract(&invoke.contract, &invoke.function, args);
+            }
+            ProposalAction::UpdateSigners(update) => {
+                validate_signer_set(&update.signers)?;
+                if update.threshold == 0 || update.threshold > update.signers.len() {
+                    return Err(VaultError::InvalidThreshold);
+                }
+                let new_config = VaultConfig {
+                    signers: update.signers.clone(),
+                    threshold: update.threshold,
+                    timelock_blocks: config.timelock_blocks,
+                    created_at_ledger: config.created_at_ledger,
+                };
+                storage::set_config(&env, &new_config);
+            }
+        }
+
+        proposal.status = ProposalStatus::Executed;
+        storage::set_proposal(&env, &proposal);
+
+        Ok(())
     }
 
     /// Deploys a new, independent vault contract instance (a fresh
