@@ -82,4 +82,12 @@ pub enum VaultError {
     /// A spending-limit or amount calculation overflowed/underflowed
     /// `i128`, or divided by zero.
     ArithmeticError = 60,
+
+    // --- Action payload ------------------------------------------------
+    /// A [`crate::types::GenericInvokeAction`] argument's XDR-encoded
+    /// bytes (`GenericInvokeAction::args`) failed to decode back into a
+    /// `Val` at execution time — either it was never validly-encoded XDR
+    /// in the first place, or it encodes an `ScVal` shape this host
+    /// doesn't accept as an invocation argument.
+    InvalidActionPayload = 70,
 }
