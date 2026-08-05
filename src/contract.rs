@@ -153,25 +153,6 @@ impl VaultFactory {
     /// [`ProposalStatus::Ready`] once `VaultConfig::threshold` distinct
     /// approvals have been collected.
     ///
-    /// # Target implementation
-    /// This is the core **M-of-N auth verification loop** and is left as
-    /// an open contributor issue. It must:
-    /// 1. `signer.require_auth()` — the caller must cryptographically be
-    ///    the address they claim to approve as (Soroban's native `auth`
-    ///    framework handles the signature verification; this call site
-    ///    just has to invoke it).
-    /// 2. Load the [`VaultConfig`] and confirm `signer` is a member of
-    ///    `signers` (else [`VaultError::SignerNotFound`]).
-    /// 3. Load the [`crate::types::Proposal`] by `proposal_id` and confirm
-    ///    its `status` is `Pending` (else
-    ///    [`VaultError::ProposalNotPending`]).
-    /// 4. Confirm `signer` is not already present in `proposal.approvals`
-    ///    (else [`VaultError::DuplicateApproval`]).
-    /// 5. Append `signer` to `proposal.approvals`.
-    /// 6. If `proposal.approvals.len() >= config.threshold`, transition
-    ///    `proposal.status` to `Ready`.
-    /// 7. Persist the updated proposal via [`storage::set_proposal`].
-    ///
     /// # Errors
     /// - [`VaultError::NotInitialized`]
     /// - [`VaultError::SignerNotFound`]
@@ -179,8 +160,27 @@ impl VaultFactory {
     /// - [`VaultError::ProposalNotPending`]
     /// - [`VaultError::DuplicateApproval`]
     pub fn approve(env: Env, signer: Address, proposal_id: u64) -> Result<(), VaultError> {
-        let _ = (&env, &signer, proposal_id);
-        todo!("M-of-N auth verification loop — see doc-comment for the exact required steps")
+        signer.require_auth();
+        let config = storage::get_config(&env)?;
+        if !config.signers.contains(&signer) {
+            return Err(VaultError::SignerNotFound);
+        }
+
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
+        if proposal.status != ProposalStatus::Pending {
+            return Err(VaultError::ProposalNotPending);
+        }
+        if proposal.approvals.contains(&signer) {
+            return Err(VaultError::DuplicateApproval);
+        }
+
+        proposal.approvals.push_back(signer);
+        if proposal.approvals.len() >= config.threshold {
+            proposal.status = ProposalStatus::Ready;
+        }
+        storage::set_proposal(&env, &proposal);
+
+        Ok(())
     }
 
     /// Executes `proposal_id` once it has reached
