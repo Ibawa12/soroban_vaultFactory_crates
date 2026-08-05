@@ -1,24 +1,15 @@
 //! Main contract entrypoints: initialization, spending-limit
-//! configuration, proposal creation, and the (currently skeletal) approval,
-//! execution, and factory-deployment flows.
+//! configuration, the full proposal lifecycle (propose/approve/execute),
+//! and factory-style deployment of new vault instances.
 //!
-//! ---
-//! ### Contributor note
-//! [`VaultFactory::initialize`], [`VaultFactory::configure_spending_limit`],
-//! and [`VaultFactory::propose`] are fully implemented and should be used
-//! as the reference pattern (auth check -> validate -> load/mutate state
-//! via [`crate::storage`] -> persist) for the three `todo!()` entrypoints
-//! below, each tracked as an open-source issue:
-//!
-//! | Function        | Suggested issue difficulty |
-//! |------------------|-----------------------------|
-//! | [`VaultFactory::approve`]     | Medium (M-of-N auth loop over existing signer set) |
-//! | [`VaultFactory::execute`]     | High (timelock + spending-limit + action dispatch, security-sensitive) |
-//! | [`VaultFactory::deploy_vault`] | High (cross-contract deployer, WASM hash validation) |
+//! All six entrypoints follow the same pattern: auth check -> validate ->
+//! load/mutate state via [`crate::storage`] -> persist.
 
 use soroban_sdk::token::TokenClient;
 use soroban_sdk::xdr::FromXdr;
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, MuxedAddress, Val, Vec};
+use soroban_sdk::{
+    contract, contractimpl, Address, BytesN, Env, IntoVal, MuxedAddress, Symbol, Val, Vec,
+};
 
 use crate::errors::VaultError;
 use crate::storage;
@@ -285,31 +276,25 @@ impl VaultFactory {
     /// `VaultConfig`, its own signer set/threshold/timelock, and its own
     /// address) using this contract as the factory.
     ///
-    /// # Target implementation
-    /// Tracked as an open contributor issue covering Soroban's
-    /// deployer/executable framework. It must:
-    /// 1. Use `env.deployer().with_current_contract(salt)` (or
-    ///    `with_address` if deploying on behalf of a different deployer
-    ///    identity) to deterministically derive the new contract's
-    ///    address from `wasm_hash` and `salt`.
-    /// 2. Deploy the child contract via `.deploy(wasm_hash)`, obtaining
-    ///    its `Address`.
-    /// 3. Invoke the new contract's own `initialize` (via
-    ///    `env.invoke_contract`) with `signers`, `threshold`, and
-    ///    `timelock_blocks`, propagating any failure as
-    ///    [`VaultError::DeploymentFailed`] rather than leaving a
-    ///    half-initialized vault reachable.
-    /// 4. Return the new vault's `Address` to the caller (e.g. so an
-    ///    off-chain indexer or UI can immediately point at it).
-    ///
-    /// Contributors should also decide and document whether
-    /// `deploy_vault` itself should be permissioned (e.g. restricted to an
-    /// admin `Address` stored at factory-initialization time) or left
-    /// permissionless, since anyone deploying a vault only spends their
-    /// own resource fees and cannot affect existing vaults.
+    /// Deliberately left **permissionless**: anyone may deploy a new vault
+    /// through this factory, since doing so only spends the caller's own
+    /// resource fees, derives an address the caller (via `salt`) already
+    /// controls the derivation of, and cannot read or affect any other
+    /// vault's state — there is nothing here for permissioning to protect.
+    /// A future admin-gated variant, if wanted, is additive and doesn't
+    /// need to replace this one.
     ///
     /// # Errors
-    /// - [`VaultError::DeploymentFailed`]
+    /// - [`VaultError::DeploymentFailed`] if the new instance's own
+    ///   `initialize` call fails for any reason: invalid `signers`/
+    ///   `threshold`/`timelock_blocks`, or the deployed Wasm not exposing
+    ///   an `initialize(signers, threshold, timelock_blocks)` entrypoint
+    ///   at all — e.g. because `wasm_hash` doesn't point at this same
+    ///   `VaultFactory` contract. This deliberately collapses every
+    ///   failure mode into one variant rather than trying to propagate the
+    ///   child's own [`VaultError`] discriminant, since `wasm_hash` is
+    ///   caller-supplied and nothing guarantees the deployed contract
+    ///   shares this crate's error taxonomy.
     pub fn deploy_vault(
         env: Env,
         wasm_hash: BytesN<32>,
@@ -318,15 +303,19 @@ impl VaultFactory {
         threshold: u32,
         timelock_blocks: u32,
     ) -> Result<Address, VaultError> {
-        let _ = (
-            &env,
-            &wasm_hash,
-            &salt,
-            &signers,
-            threshold,
-            timelock_blocks,
-        );
-        todo!("Deterministic child-contract deployment via env.deployer() — see doc-comment for the exact required steps")
+        let deployer = env.deployer().with_current_contract(salt);
+        let vault_address = deployer.deploy_v2(wasm_hash, ());
+
+        let mut args: Vec<Val> = Vec::new(&env);
+        args.push_back(signers.into_val(&env));
+        args.push_back(threshold.into_val(&env));
+        args.push_back(timelock_blocks.into_val(&env));
+
+        let init_fn = Symbol::new(&env, "initialize");
+        match env.try_invoke_contract::<(), VaultError>(&vault_address, &init_fn, args) {
+            Ok(Ok(())) => Ok(vault_address),
+            _ => Err(VaultError::DeploymentFailed),
+        }
     }
 }
 
