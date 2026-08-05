@@ -1,29 +1,27 @@
 # Contributing to soroban-VaultFactory
 
-Thanks for considering a contribution. This contract moves (or will move,
-once `execute` is implemented) real funds under real multisig/timelock
-guarantees — the bar for review here is correspondingly higher than for a
-typical open-source PR. This document explains how to contribute
-effectively and safely.
+Thanks for considering a contribution. This contract moves real funds
+under real multisig/timelock guarantees — the bar for review here is
+correspondingly higher than for a typical open-source PR. This document
+explains how to contribute effectively and safely.
 
 ## Before you start
 
-1. **Check for an existing issue or claim.** If you're picking up
-   `approve`, `execute`, or `deploy_vault` (see the
-   [README's Open Issues table](README.md#open-issues)), comment on (or
-   open) the corresponding GitHub issue first so two people don't
-   duplicate the same work.
-2. **Read the doc-comment before writing code.** Every `todo!()` entrypoint
-   in [`src/contract.rs`](src/contract.rs) has a doc-comment enumerating
-   the exact required steps, in order, and every error variant it must be
-   able to return. That doc-comment is the spec. If you believe it's wrong,
-   incomplete, or unsafe as written, open a discussion issue before
-   implementing something different — for `execute` especially, a
-   "better" undiscussed deviation is a bigger risk than a slower discussed
-   one.
+1. **Check for an existing issue or claim.** If you're picking up one of
+   the items in the
+   [README's Known Limitations section](README.md#known-limitations),
+   comment on (or open) the corresponding GitHub issue first so two
+   people don't duplicate the same work.
+2. **Read the doc-comment before writing code.** Every entrypoint in
+   [`src/contract.rs`](src/contract.rs) has a doc-comment enumerating its
+   behavior, in order, and every error variant it can return. That
+   doc-comment is the spec. If you believe it's wrong, incomplete, or
+   unsafe as written, open a discussion issue before changing behavior —
+   for `execute` especially, an undiscussed "improvement" is a bigger risk
+   than a slower discussed one.
 3. **Small PRs over big ones.** One entrypoint, one bug fix, or one test
-   improvement per PR. Don't bundle `approve` and `execute` into a single
-   PR even though they're related — they should be reviewable (and
+   improvement per PR. Don't bundle `approve` and `execute` changes into a
+   single PR even though they're related — they should be reviewable (and
    revertable) independently.
 
 ## Development setup
@@ -31,10 +29,19 @@ effectively and safely.
 ```bash
 git clone <your-fork-url>
 cd soroban-VaultFactory
-rustup target add wasm32-unknown-unknown   # rust-toolchain.toml pins this
-cargo test                                  # Env-based integration tests
-cargo build --target wasm32-unknown-unknown --release   # the deployable artifact
+rustup target add wasm32v1-none   # rust-toolchain.toml pins this
+cargo build --target wasm32v1-none --release   # build the deployable Wasm
+                                                # first — deploy_vault's
+                                                # own integration test
+                                                # deploys a real instance
+                                                # of it, see src/test.rs
+cargo test                                     # Env-based integration tests
 ```
+
+Note the target is `wasm32v1-none`, not `wasm32-unknown-unknown` — see the
+comment on `targets` in [`rust-toolchain.toml`](rust-toolchain.toml) for
+why (short version: current stable Rust's `wasm32-unknown-unknown` output
+uses a Wasm encoding Soroban's host rejects).
 
 No other tooling is required to get started. If you also want to exercise
 the contract via the Soroban CLI (`stellar contract deploy`, invoking it
@@ -45,9 +52,9 @@ against a local/testnet network), see the
 ## Coding conventions
 
 CI (`.github/workflows/ci.yml`) enforces `cargo fmt --check`, `cargo clippy
--- -D warnings`, `cargo test`, and the `wasm32-unknown-unknown` release
-build on every push and PR. The rest of these are enforced in review, so
-please self-check before requesting it:
+-- -D warnings`, `cargo test`, and the `wasm32v1-none` release build on
+every push and PR. The rest of these are enforced in review, so please
+self-check before requesting it:
 
 - **Every state-mutating entrypoint calls `require_auth()` on the
   address it claims to act as, before doing anything else.** This is the
@@ -91,10 +98,6 @@ please self-check before requesting it:
   entrypoint you're implementing (e.g. for `execute`: successful dispatch
   of each `ProposalAction` variant, `TimelockNotExpired`,
   `InsufficientApprovals`, `SpendingLimitExceeded`).
-- Remove the `#[ignore = "..."]` attribute from the corresponding
-  placeholder test in `src/test.rs` and complete its assertions once your
-  implementation is in — those tests currently exist specifically as your
-  target.
 - Run `cargo test` (not just `cargo check`) before opening a PR. All
   existing tests must still pass.
 
@@ -108,9 +111,8 @@ please self-check before requesting it:
       anything
 - [ ] New/updated tests in `src/test.rs`, covering the golden path and
       every documented error condition
-- [ ] Corresponding `#[ignore]` removed with real assertions
 - [ ] `cargo test` passes locally
-- [ ] `cargo build --target wasm32-unknown-unknown --release` succeeds
+- [ ] `cargo build --target wasm32v1-none --release` succeeds
 - [ ] No new `unwrap()`/`expect()`/`panic!()` — every failure path returns
       `Result<T, VaultError>`
 - [ ] No `soroban_sdk::Val` introduced into a persisted (`#[contracttype]`)

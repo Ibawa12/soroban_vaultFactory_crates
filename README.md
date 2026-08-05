@@ -57,14 +57,16 @@ reimplements — and re-discovers the same edge cases in — on its own.
 
 ## Status
 
-**Early-stage / actively looking for contributors.** Vault initialization,
-signer/threshold validation, spending-limit configuration, and proposal
-creation are complete and tested. The security-critical approval and
-execution flow, and the factory's child-vault deployment mechanism, are
-fully specified — signatures, required steps, and every error condition are
-documented directly on the functions in
-[`src/contract.rs`](src/contract.rs) — but their bodies are open `todo!()`s.
-See [Open Issues](#open-issues) below if you want to pick one up.
+**Feature-complete, still looking for review.** All six entrypoints —
+initialize, configure_spending_limit, propose, approve, execute, and
+deploy_vault — are implemented and covered by 20 passing integration
+tests, including the full multisig+timelock+spending-limit happy path,
+`UpdateSigners` governance actions, and `deploy_vault` deploying (and
+successfully initializing) a real child instance of this same contract.
+Security review is especially welcome on `execute` (moves real funds) and
+`approve` (the M-of-N auth loop) — see
+[Known limitations](#known-limitations) below for what's been flagged so
+far, and [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow.
 
 ## Why this design
 
@@ -111,8 +113,7 @@ src/
 ├── errors.rs     # VaultError: the contract's complete #[contracterror] taxonomy
 ├── types.rs      # VaultConfig, Proposal, ProposalAction, SpendingLimit, ...
 ├── storage.rs    # Instance vs. Temporary storage keys + TTL bumping
-├── contract.rs   # #[contract] entrypoints (init/config/propose implemented;
-│                 #  approve/execute/deploy_vault are documented todo!() skeletons)
+├── contract.rs   # #[contract] entrypoints — all six implemented and tested
 └── test.rs       # Env-based contract-level integration test harness
 ```
 
@@ -125,9 +126,19 @@ is long-lived (instance) or ephemeral (temporary).
 ## Quick start
 
 ```bash
-cargo test                                                # full test suite
-cargo build --target wasm32-unknown-unknown --release     # deployable contract Wasm
+rustup target add wasm32v1-none    # rust-toolchain.toml pins this
+cargo build --target wasm32v1-none --release   # build the deployable Wasm first —
+                                                # deploy_vault's integration test
+                                                # deploys a real instance of it
+cargo test                                     # full test suite
 ```
+
+Note the target is `wasm32v1-none`, not `wasm32-unknown-unknown`: on
+current stable Rust, `wasm32-unknown-unknown`'s default codegen emits a
+reference-types-style encoding for indirect calls that Soroban's Wasm
+host rejects at upload time. `wasm32v1-none` targets the Wasm MVP
+explicitly and is what the host actually accepts — see the comment on
+`targets` in [`rust-toolchain.toml`](rust-toolchain.toml).
 
 ## Usage sketch
 
@@ -147,28 +158,37 @@ let action = ProposalAction::Transfer(TransferAction {
 });
 let proposal_id = client.propose(&alice, &action);
 
-// 4. (once implemented) collect approvals, wait out the timelock, execute
-// client.approve(&bob, &proposal_id);
-// client.execute(&alice, &proposal_id);
+// 4. Collect approvals, wait out the timelock, execute
+client.approve(&bob, &proposal_id);
+// ... after `timelock_blocks` ledgers have passed:
+client.execute(&alice, &proposal_id);
 ```
 
-## Open Issues
+## Known limitations
 
-These are the primary places external contributors can add value right now.
-Each has a full doc-comment on the function in
-[`src/contract.rs`](src/contract.rs) spelling out the exact required steps
-and every error condition — read it before opening a PR, since these are
-security-sensitive entrypoints and the spec is deliberately precise.
+Found while implementing and testing `approve`/`execute`/`deploy_vault` —
+documented rather than silently worked around, and good starting points
+if you want to contribute:
 
-| Function | File | Suggested difficulty | What's involved |
-|---|---|---|---|
-| `approve` | `src/contract.rs` | **Medium** | The core M-of-N auth verification loop over the existing signer set |
-| `execute` | `src/contract.rs` | **High** (security-sensitive) | Timelock check + spending-limit enforcement + `ProposalAction` dispatch |
-| `deploy_vault` | `src/contract.rs` | **High** | Soroban's deployer/executable framework — deterministic child-contract deployment |
-
-Each has a matching `#[ignore]`d integration test in
-[`src/test.rs`](src/test.rs) sketching the expected flow — remove the
-`#[ignore]` and complete the assertions once your implementation lands.
+- **`execute` is permissionless by design.** The `executor` address isn't
+  auth-checked or required to be a current signer — the multisig+timelock
+  gate on the *proposal* is what authorizes the action, and `execute`
+  re-validates `Ready` status, the timelock, and the approval count itself
+  before doing anything irreversible. This is a deliberate choice (see the
+  doc-comment on `execute`), not an oversight, but it's worth a second set
+  of eyes given how security-sensitive this entrypoint is.
+- **`deploy_vault` is permissionless too**, for the reasons in its
+  doc-comment. An admin-gated variant would be an additive, non-breaking
+  follow-up if a deployment wants one.
+- **`GenericInvokeAction::args` decoding failure maps to one generic
+  error**, [`VaultError::InvalidActionPayload`] — it doesn't distinguish
+  "not valid XDR at all" from "valid XDR but not a shape `invoke_contract`
+  accepts."
+- **No getter/view entrypoint for a `Proposal`'s current state.**
+  Off-chain callers (and this crate's own tests) can only infer a
+  proposal's status indirectly, through how a subsequent `approve`/
+  `execute` call behaves. A read-only `get_proposal` entrypoint would be a
+  small, valuable, and non-breaking addition.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow, coding
 conventions, and PR checklist — `execute` in particular moves real funds, so
