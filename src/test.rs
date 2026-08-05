@@ -3,19 +3,17 @@
 //! Every test here spins up a fresh [`Env`], deploys a fresh contract
 //! instance via [`setup`], and drives it exclusively through the
 //! generated [`VaultFactoryClient`] — the same interface an off-chain
-//! caller or another contract would use. Use this file as the template
-//! when adding coverage for a newly implemented entrypoint (in
-//! particular, `approve`, `execute`, and `deploy_vault` — see the
-//! `#[ignore]`d placeholders at the bottom).
+//! caller or another contract would use.
 
 #![cfg(test)]
 
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::token::StellarAssetClient;
 use soroban_sdk::{vec, Address, Env};
 
 use crate::contract::{VaultFactory, VaultFactoryClient};
 use crate::errors::VaultError;
-use crate::types::{ProposalAction, TransferAction};
+use crate::types::{ProposalAction, TransferAction, UpdateSignersAction};
 
 /// Number of signers used by [`setup`]'s default vault, and the default
 /// M-of-N threshold (2-of-3).
@@ -44,6 +42,17 @@ fn setup(env: &Env) -> (VaultFactoryClient<'static>, soroban_sdk::Vec<Address>) 
     let (client, signers) = setup_uninitialized(env);
     client.initialize(&signers, &DEFAULT_THRESHOLD, &DEFAULT_TIMELOCK_BLOCKS);
     (client, signers)
+}
+
+/// Registers a Stellar Asset Contract test double, mints `amount` to
+/// `to`, and returns its address. Used by the `execute` tests that need a
+/// real token to move.
+fn setup_funded_token(env: &Env, to: &Address, amount: i128) -> Address {
+    let admin = Address::generate(env);
+    let sac = env.register_stellar_asset_contract_v2(admin);
+    let asset = sac.address();
+    StellarAssetClient::new(env, &asset).mint(to, &amount);
+    asset
 }
 
 #[test]
@@ -164,15 +173,9 @@ fn propose_rejects_non_signer() {
     assert_eq!(result, Err(Ok(VaultError::SignerNotFound)));
 }
 
-// --- Contributor-facing entrypoint placeholders ----------------------------
-//
-// `approve`, `execute`, and `deploy_vault` currently panic via `todo!()`
-// (see `contract.rs`). These tests sketch the intended flow and are marked
-// `#[ignore]` so CI stays green; once an issue lands an implementation,
-// remove the `#[ignore]` and flesh out the assertions.
+// --- approve -----------------------------------------------------------
 
 #[test]
-#[ignore = "VaultFactory::approve is an open contributor issue"]
 fn approve_transitions_proposal_to_ready_once_threshold_met() {
     let env = Env::default();
     env.mock_all_auths();
@@ -186,11 +189,61 @@ fn approve_transitions_proposal_to_ready_once_threshold_met() {
 
     client.approve(&signers.get_unchecked(0), &id);
     client.approve(&signers.get_unchecked(1), &id);
-    // Once implemented: assert the proposal's status is now `Ready`.
+
+    // There's no direct proposal getter exposed on the contract, so the
+    // Pending -> Ready transition is observed indirectly: a third signer
+    // approving a Ready (no longer Pending) proposal must now fail.
+    let result = client.try_approve(&signers.get_unchecked(2), &id);
+    assert_eq!(result, Err(Ok(VaultError::ProposalNotPending)));
 }
 
 #[test]
-#[ignore = "VaultFactory::execute is an open contributor issue"]
+fn approve_rejects_non_signer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, signers) = setup(&env);
+    let stranger = Address::generate(&env);
+    let action = ProposalAction::Transfer(TransferAction {
+        asset: Address::generate(&env),
+        to: Address::generate(&env),
+        amount: 500,
+    });
+    let id = client.propose(&signers.get_unchecked(0), &action);
+
+    let result = client.try_approve(&stranger, &id);
+    assert_eq!(result, Err(Ok(VaultError::SignerNotFound)));
+}
+
+#[test]
+fn approve_rejects_duplicate_approval_from_the_same_signer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, signers) = setup(&env);
+    let action = ProposalAction::Transfer(TransferAction {
+        asset: Address::generate(&env),
+        to: Address::generate(&env),
+        amount: 500,
+    });
+    let id = client.propose(&signers.get_unchecked(0), &action);
+
+    client.approve(&signers.get_unchecked(0), &id);
+    let result = client.try_approve(&signers.get_unchecked(0), &id);
+    assert_eq!(result, Err(Ok(VaultError::DuplicateApproval)));
+}
+
+#[test]
+fn approve_rejects_unknown_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, signers) = setup(&env);
+
+    let result = client.try_approve(&signers.get_unchecked(0), &999u64);
+    assert_eq!(result, Err(Ok(VaultError::ProposalNotFound)));
+}
+
+// --- execute -------------------------------------------------------------
+
+#[test]
 fn execute_rejects_before_timelock_elapses() {
     let env = Env::default();
     env.mock_all_auths();
@@ -209,14 +262,122 @@ fn execute_rejects_before_timelock_elapses() {
 }
 
 #[test]
-#[ignore = "VaultFactory::deploy_vault is an open contributor issue"]
+fn execute_rejects_a_still_pending_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, signers) = setup(&env);
+    let action = ProposalAction::Transfer(TransferAction {
+        asset: Address::generate(&env),
+        to: Address::generate(&env),
+        amount: 500,
+    });
+    let id = client.propose(&signers.get_unchecked(0), &action);
+    // Only one of the two required approvals.
+    client.approve(&signers.get_unchecked(0), &id);
+
+    let result = client.try_execute(&signers.get_unchecked(0), &id);
+    assert_eq!(result, Err(Ok(VaultError::ProposalNotReady)));
+}
+
+#[test]
+fn execute_transfers_funds_after_timelock_elapses() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, signers) = setup(&env);
+    let recipient = Address::generate(&env);
+    let asset = setup_funded_token(&env, &client.address, 10_000i128);
+
+    let action = ProposalAction::Transfer(TransferAction {
+        asset: asset.clone(),
+        to: recipient.clone(),
+        amount: 4_000i128,
+    });
+    let id = client.propose(&signers.get_unchecked(0), &action);
+    client.approve(&signers.get_unchecked(0), &id);
+    client.approve(&signers.get_unchecked(1), &id);
+
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + DEFAULT_TIMELOCK_BLOCKS);
+    client.execute(&signers.get_unchecked(0), &id);
+
+    let token = soroban_sdk::token::TokenClient::new(&env, &asset);
+    assert_eq!(token.balance(&recipient), 4_000i128);
+    assert_eq!(token.balance(&client.address), 6_000i128);
+
+    // Executed proposals are terminal: a second execute must fail.
+    let result = client.try_execute(&signers.get_unchecked(0), &id);
+    assert_eq!(result, Err(Ok(VaultError::ProposalNotReady)));
+}
+
+#[test]
+fn execute_rejects_transfer_exceeding_the_spending_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, signers) = setup(&env);
+    let recipient = Address::generate(&env);
+    let asset = setup_funded_token(&env, &client.address, 10_000i128);
+    client.configure_spending_limit(&signers.get_unchecked(0), &asset, &1_000i128, &17_280u32);
+
+    let action = ProposalAction::Transfer(TransferAction {
+        asset: asset.clone(),
+        to: recipient,
+        amount: 4_000i128, // exceeds the 1,000 limit configured above
+    });
+    let id = client.propose(&signers.get_unchecked(0), &action);
+    client.approve(&signers.get_unchecked(0), &id);
+    client.approve(&signers.get_unchecked(1), &id);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + DEFAULT_TIMELOCK_BLOCKS);
+
+    let result = client.try_execute(&signers.get_unchecked(0), &id);
+    assert_eq!(result, Err(Ok(VaultError::SpendingLimitExceeded)));
+}
+
+#[test]
+fn execute_applies_update_signers_action() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, signers) = setup(&env);
+    let new_signer = Address::generate(&env);
+    let new_signers = vec![&env, signers.get_unchecked(0), new_signer.clone()];
+
+    let action = ProposalAction::UpdateSigners(UpdateSignersAction {
+        signers: new_signers,
+        threshold: 1,
+    });
+    let id = client.propose(&signers.get_unchecked(0), &action);
+    client.approve(&signers.get_unchecked(0), &id);
+    client.approve(&signers.get_unchecked(1), &id);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + DEFAULT_TIMELOCK_BLOCKS);
+    client.execute(&signers.get_unchecked(0), &id);
+
+    // The old third signer is no longer part of the vault...
+    let stale_action = ProposalAction::Transfer(TransferAction {
+        asset: Address::generate(&env),
+        to: Address::generate(&env),
+        amount: 1,
+    });
+    let result = client.try_propose(&signers.get_unchecked(2), &stale_action.clone());
+    assert_eq!(result, Err(Ok(VaultError::SignerNotFound)));
+
+    // ...while the newly-added signer now is.
+    client.propose(&new_signer, &stale_action);
+}
+
+// --- deploy_vault --------------------------------------------------------
+
+#[test]
+#[ignore = "needs a real uploaded wasm fixture, not this placeholder all-zero hash — see the next commit"]
 fn deploy_vault_returns_a_freshly_initialized_child_vault() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, signers) = setup(&env);
-    // Once implemented, replace this with a real uploaded WASM hash via
+    // This needs a real uploaded WASM hash via
     // `env.deployer().upload_contract_wasm(WASM_BYTES)` (e.g. this same
-    // contract's own compiled output, for a self-similar factory).
+    // contract's own compiled output, for a self-similar factory) —
+    // deploy_vault legitimately panics against an unknown hash like this
+    // one, since Soroban's deployer API doesn't offer a checked variant.
     let wasm_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
     let salt = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
 
