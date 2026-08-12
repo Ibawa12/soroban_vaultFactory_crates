@@ -1,3 +1,13 @@
 [toolchain]
 channel = "stable"
-targets = ["wasm32-unknown-unknown"]
+# wasm32v1-none, not wasm32-unknown-unknown, is the deployable target: on
+# current stable rustc, wasm32-unknown-unknown's default codegen emits a
+# reference-types-style encoding for indirect calls that Soroban's
+# bundled Wasm parser (soroban-env-host's wasmi, pinned well behind
+# current Wasm proposals) rejects outright at upload time with
+# `Error(WasmVm, InvalidAction)` / "reference-types not enabled". No
+# `-C target-feature=-reference-types` combination changes this — it's
+# baseline codegen for wasm32-unknown-unknown on this toolchain, not a
+# feature the flag gates. wasm32v1-none targets the Wasm MVP explicitly
+# and produces output the host actually accepts.
+targets = ["wasm32v1-none"]

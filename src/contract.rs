@@ -1,27 +1,21 @@
 //! Main contract entrypoints: initialization, spending-limit
-//! configuration, proposal creation, and the (currently skeletal) approval,
-//! execution, and factory-deployment flows.
+//! configuration, the full proposal lifecycle (propose/approve/execute),
+//! and factory-style deployment of new vault instances.
 //!
-//! ---
-//! ### Contributor note
-//! [`VaultFactory::initialize`], [`VaultFactory::configure_spending_limit`],
-//! and [`VaultFactory::propose`] are fully implemented and should be used
-//! as the reference pattern (auth check -> validate -> load/mutate state
-//! via [`crate::storage`] -> persist) for the three `todo!()` entrypoints
-//! below, each tracked as an open-source issue:
-//!
-//! | Function        | Suggested issue difficulty |
-//! |------------------|-----------------------------|
-//! | [`VaultFactory::approve`]     | Medium (M-of-N auth loop over existing signer set) |
-//! | [`VaultFactory::execute`]     | High (timelock + spending-limit + action dispatch, security-sensitive) |
-//! | [`VaultFactory::deploy_vault`] | High (cross-contract deployer, WASM hash validation) |
+//! All six entrypoints follow the same pattern: auth check -> validate ->
+//! load/mutate state via [`crate::storage`] -> persist.
 
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, Vec};
+use soroban_sdk::token::TokenClient;
+use soroban_sdk::xdr::FromXdr;
+use soroban_sdk::{
+    contract, contractimpl, Address, BytesN, Env, IntoVal, MuxedAddress, Symbol, Val, Vec,
+};
 
 use crate::errors::VaultError;
 use crate::storage;
 use crate::types::{
-    ProposalAction, ProposalStatus, SpendingLimit, VaultConfig, MAX_SIGNERS, MAX_TIMELOCK_LEDGERS,
+    ProposalAction, ProposalStatus, SpendingLimit, SpendingUsage, VaultConfig, MAX_SIGNERS,
+    MAX_TIMELOCK_LEDGERS,
 };
 
 #[contract]
@@ -153,25 +147,6 @@ impl VaultFactory {
     /// [`ProposalStatus::Ready`] once `VaultConfig::threshold` distinct
     /// approvals have been collected.
     ///
-    /// # Target implementation
-    /// This is the core **M-of-N auth verification loop** and is left as
-    /// an open contributor issue. It must:
-    /// 1. `signer.require_auth()` — the caller must cryptographically be
-    ///    the address they claim to approve as (Soroban's native `auth`
-    ///    framework handles the signature verification; this call site
-    ///    just has to invoke it).
-    /// 2. Load the [`VaultConfig`] and confirm `signer` is a member of
-    ///    `signers` (else [`VaultError::SignerNotFound`]).
-    /// 3. Load the [`crate::types::Proposal`] by `proposal_id` and confirm
-    ///    its `status` is `Pending` (else
-    ///    [`VaultError::ProposalNotPending`]).
-    /// 4. Confirm `signer` is not already present in `proposal.approvals`
-    ///    (else [`VaultError::DuplicateApproval`]).
-    /// 5. Append `signer` to `proposal.approvals`.
-    /// 6. If `proposal.approvals.len() >= config.threshold`, transition
-    ///    `proposal.status` to `Ready`.
-    /// 7. Persist the updated proposal via [`storage::set_proposal`].
-    ///
     /// # Errors
     /// - [`VaultError::NotInitialized`]
     /// - [`VaultError::SignerNotFound`]
@@ -179,43 +154,41 @@ impl VaultFactory {
     /// - [`VaultError::ProposalNotPending`]
     /// - [`VaultError::DuplicateApproval`]
     pub fn approve(env: Env, signer: Address, proposal_id: u64) -> Result<(), VaultError> {
-        let _ = (&env, &signer, proposal_id);
-        todo!("M-of-N auth verification loop — see doc-comment for the exact required steps")
+        signer.require_auth();
+        let config = storage::get_config(&env)?;
+        if !config.signers.contains(&signer) {
+            return Err(VaultError::SignerNotFound);
+        }
+
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
+        if proposal.status != ProposalStatus::Pending {
+            return Err(VaultError::ProposalNotPending);
+        }
+        if proposal.approvals.contains(&signer) {
+            return Err(VaultError::DuplicateApproval);
+        }
+
+        proposal.approvals.push_back(signer);
+        if proposal.approvals.len() >= config.threshold {
+            proposal.status = ProposalStatus::Ready;
+        }
+        storage::set_proposal(&env, &proposal);
+
+        Ok(())
     }
 
     /// Executes `proposal_id` once it has reached
     /// [`ProposalStatus::Ready`] and its timelock has elapsed, dispatching
     /// on its [`ProposalAction`] variant.
     ///
-    /// # Target implementation
-    /// Tracked as a **security-sensitive** open contributor issue. It
-    /// must, in order:
-    /// 1. Load the [`crate::types::Proposal`] by `proposal_id` (else
-    ///    [`VaultError::ProposalNotFound`]).
-    /// 2. Confirm `status == Ready` (else
-    ///    [`VaultError::ProposalNotReady`]).
-    /// 3. Confirm `env.ledger().sequence() >= proposal.executable_after_ledger`
-    ///    (else [`VaultError::TimelockNotExpired`]).
-    /// 4. Confirm `proposal.approvals.len() >= config.threshold` as a
-    ///    defense-in-depth re-check (the `Ready` transition in
-    ///    [`VaultFactory::approve`] should already guarantee this, but
-    ///    execution is the last line of defense before funds move).
-    /// 5. Dispatch on `proposal.action`:
-    ///    - `Transfer { asset, to, amount }`: if a [`SpendingLimit`] is
-    ///      configured for `asset`, load/roll over the
-    ///      [`crate::types::SpendingUsage`] window (via
-    ///      `env.ledger().sequence()` vs
-    ///      `SpendingUsage::period_start_ledger` +
-    ///      `SpendingLimit::period_ledgers`) and reject with
-    ///      [`VaultError::SpendingLimitExceeded`] if `spent + amount`
-    ///      would exceed `limit_per_period`; otherwise record the usage
-    ///      and invoke the token contract's `transfer`.
-    ///    - `GenericInvoke { contract, function, args }`: invoke via
-    ///      `env.invoke_contract`.
-    ///    - `UpdateSigners { signers, threshold }`: re-validate via the
-    ///      same rules as [`VaultFactory::initialize`] and overwrite
-    ///      [`VaultConfig`] in instance storage.
-    /// 6. Transition `proposal.status` to `Executed` and persist.
+    /// Execution itself is intentionally permissionless: `executor` is not
+    /// required to be a current signer and is not auth-checked. The
+    /// multisig/timelock gate on the *proposal* is what authorizes the
+    /// underlying action; requiring a specific caller to also submit the
+    /// execution transaction would only add friction (e.g. a "keeper" or
+    /// off-chain relayer submitting on a signer's behalf) without adding
+    /// security, since `execute` re-validates `Ready` status, the timelock,
+    /// and the approval count itself before doing anything irreversible.
     ///
     /// # Errors
     /// - [`VaultError::NotInitialized`]
@@ -223,43 +196,105 @@ impl VaultFactory {
     /// - [`VaultError::ProposalNotReady`]
     /// - [`VaultError::TimelockNotExpired`]
     /// - [`VaultError::InsufficientApprovals`]
-    /// - [`VaultError::SpendingLimitNotConfigured`] /
-    ///   [`VaultError::SpendingLimitExceeded`]
+    /// - [`VaultError::SpendingLimitExceeded`]
     /// - [`VaultError::ArithmeticError`]
+    /// - [`VaultError::InvalidActionPayload`] (a `GenericInvoke` argument
+    ///   fails to decode back into a `Val`)
+    /// - [`VaultError::EmptySignerSet`], [`VaultError::DuplicateSigner`],
+    ///   [`VaultError::InvalidThreshold`] (an `UpdateSigners` action whose
+    ///   payload fails the same validation `initialize` applies)
     pub fn execute(env: Env, executor: Address, proposal_id: u64) -> Result<(), VaultError> {
-        let _ = (&env, &executor, proposal_id);
-        todo!("Timelock + spending-limit enforcement + action dispatch — see doc-comment for the exact required steps")
+        let _ = &executor;
+        let config = storage::get_config(&env)?;
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
+
+        if proposal.status != ProposalStatus::Ready {
+            return Err(VaultError::ProposalNotReady);
+        }
+        if env.ledger().sequence() < proposal.executable_after_ledger {
+            return Err(VaultError::TimelockNotExpired);
+        }
+        if proposal.approvals.len() < config.threshold {
+            return Err(VaultError::InsufficientApprovals);
+        }
+
+        match &proposal.action {
+            ProposalAction::Transfer(transfer) => {
+                if let Some(limit) = storage::get_spending_limit(&env, &transfer.asset) {
+                    let current_ledger = env.ledger().sequence();
+                    let mut usage = storage::get_spending_usage(&env, &transfer.asset)
+                        .filter(|u| current_ledger < u.period_start_ledger + limit.period_ledgers)
+                        .unwrap_or(SpendingUsage {
+                            spent: 0,
+                            period_start_ledger: current_ledger,
+                        });
+                    let new_spent = usage
+                        .spent
+                        .checked_add(transfer.amount)
+                        .ok_or(VaultError::ArithmeticError)?;
+                    if new_spent > limit.limit_per_period {
+                        return Err(VaultError::SpendingLimitExceeded);
+                    }
+                    usage.spent = new_spent;
+                    storage::set_spending_usage(&env, &transfer.asset, &usage);
+                }
+                let token = TokenClient::new(&env, &transfer.asset);
+                let to: MuxedAddress = transfer.to.clone().into();
+                token.transfer(&env.current_contract_address(), &to, &transfer.amount);
+            }
+            ProposalAction::GenericInvoke(invoke) => {
+                let mut args: Vec<Val> = Vec::new(&env);
+                for arg_bytes in invoke.args.iter() {
+                    let arg = Val::from_xdr(&env, &arg_bytes)
+                        .map_err(|_| VaultError::InvalidActionPayload)?;
+                    args.push_back(arg);
+                }
+                let _: Val = env.invoke_contract(&invoke.contract, &invoke.function, args);
+            }
+            ProposalAction::UpdateSigners(update) => {
+                validate_signer_set(&update.signers)?;
+                if update.threshold == 0 || update.threshold > update.signers.len() {
+                    return Err(VaultError::InvalidThreshold);
+                }
+                let new_config = VaultConfig {
+                    signers: update.signers.clone(),
+                    threshold: update.threshold,
+                    timelock_blocks: config.timelock_blocks,
+                    created_at_ledger: config.created_at_ledger,
+                };
+                storage::set_config(&env, &new_config);
+            }
+        }
+
+        proposal.status = ProposalStatus::Executed;
+        storage::set_proposal(&env, &proposal);
+
+        Ok(())
     }
 
     /// Deploys a new, independent vault contract instance (a fresh
     /// `VaultConfig`, its own signer set/threshold/timelock, and its own
     /// address) using this contract as the factory.
     ///
-    /// # Target implementation
-    /// Tracked as an open contributor issue covering Soroban's
-    /// deployer/executable framework. It must:
-    /// 1. Use `env.deployer().with_current_contract(salt)` (or
-    ///    `with_address` if deploying on behalf of a different deployer
-    ///    identity) to deterministically derive the new contract's
-    ///    address from `wasm_hash` and `salt`.
-    /// 2. Deploy the child contract via `.deploy(wasm_hash)`, obtaining
-    ///    its `Address`.
-    /// 3. Invoke the new contract's own `initialize` (via
-    ///    `env.invoke_contract`) with `signers`, `threshold`, and
-    ///    `timelock_blocks`, propagating any failure as
-    ///    [`VaultError::DeploymentFailed`] rather than leaving a
-    ///    half-initialized vault reachable.
-    /// 4. Return the new vault's `Address` to the caller (e.g. so an
-    ///    off-chain indexer or UI can immediately point at it).
-    ///
-    /// Contributors should also decide and document whether
-    /// `deploy_vault` itself should be permissioned (e.g. restricted to an
-    /// admin `Address` stored at factory-initialization time) or left
-    /// permissionless, since anyone deploying a vault only spends their
-    /// own resource fees and cannot affect existing vaults.
+    /// Deliberately left **permissionless**: anyone may deploy a new vault
+    /// through this factory, since doing so only spends the caller's own
+    /// resource fees, derives an address the caller (via `salt`) already
+    /// controls the derivation of, and cannot read or affect any other
+    /// vault's state — there is nothing here for permissioning to protect.
+    /// A future admin-gated variant, if wanted, is additive and doesn't
+    /// need to replace this one.
     ///
     /// # Errors
-    /// - [`VaultError::DeploymentFailed`]
+    /// - [`VaultError::DeploymentFailed`] if the new instance's own
+    ///   `initialize` call fails for any reason: invalid `signers`/
+    ///   `threshold`/`timelock_blocks`, or the deployed Wasm not exposing
+    ///   an `initialize(signers, threshold, timelock_blocks)` entrypoint
+    ///   at all — e.g. because `wasm_hash` doesn't point at this same
+    ///   `VaultFactory` contract. This deliberately collapses every
+    ///   failure mode into one variant rather than trying to propagate the
+    ///   child's own [`VaultError`] discriminant, since `wasm_hash` is
+    ///   caller-supplied and nothing guarantees the deployed contract
+    ///   shares this crate's error taxonomy.
     pub fn deploy_vault(
         env: Env,
         wasm_hash: BytesN<32>,
@@ -268,15 +303,19 @@ impl VaultFactory {
         threshold: u32,
         timelock_blocks: u32,
     ) -> Result<Address, VaultError> {
-        let _ = (
-            &env,
-            &wasm_hash,
-            &salt,
-            &signers,
-            threshold,
-            timelock_blocks,
-        );
-        todo!("Deterministic child-contract deployment via env.deployer() — see doc-comment for the exact required steps")
+        let deployer = env.deployer().with_current_contract(salt);
+        let vault_address = deployer.deploy_v2(wasm_hash, ());
+
+        let mut args: Vec<Val> = Vec::new(&env);
+        args.push_back(signers.into_val(&env));
+        args.push_back(threshold.into_val(&env));
+        args.push_back(timelock_blocks.into_val(&env));
+
+        let init_fn = Symbol::new(&env, "initialize");
+        match env.try_invoke_contract::<(), VaultError>(&vault_address, &init_fn, args) {
+            Ok(Ok(())) => Ok(vault_address),
+            _ => Err(VaultError::DeploymentFailed),
+        }
     }
 }
 
