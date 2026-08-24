@@ -60,3 +60,7 @@ Please don't open a public issue for suspected vulnerabilities — see [SECURITY
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).
+
+## Code of Conduct
+
+See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
